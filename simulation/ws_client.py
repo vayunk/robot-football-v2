@@ -1,11 +1,11 @@
 # Copyright (c) 2025 Oguzhan Cagirir (OguzhanCOG), KCL Electronics Society
 #
-# Project: KCL FoAI RoboFootball System
-# File: ws_client.py
-# Description: Asynchronous WebSocket client for sending joystick commands and managing connection to a remote server.
+# Project: KCL RoboFootball System (FoAI Fork)
+# File: ws_client.py (MQTT EDITION)
+# Description: MQTT client acting as a drop-in replacement for the original WebSocket client. Sends joystick commands directly to the broker.
 #
 # Author: Oguzhan Cagirir (OguzhanCOG)
-# Date: May 24, 2025
+# Date: December 2, 2025
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the MIT License as published by
@@ -19,230 +19,137 @@
 # You should have received a copy of the MIT License
 # along with this program. If not, see <https://opensource.org/licenses/MIT>.
 #
-# --- Version: 1.2.0 ---
+# --- Version: 2.0.0 (MQTT) ---
 
-import asyncio
-import websockets
 import json
-import threading
 import time
-import traceback
+import paho.mqtt.client as mqtt
+import threading
 
-_ws_client_printed_messages = set()
-def print_once_ws(message_key, message_content):
-    global _ws_client_printed_messages
-    if message_key not in _ws_client_printed_messages:
-        print(message_content)
-        _ws_client_printed_messages.add(message_key)
+# ==========================================
+# CONFIGURATION
+# ==========================================
 
-class WebSocketGameClient:
-    def __init__(self, uri):
-        self.uri = uri
-        self.loop = None
-        self.thread = None
+MQTT_BROKER_IP = "46.224.81.207"
+MQTT_PORT = 1883
+
+# MAP SIMULATION IDs TO ESP32 MAC ADDRESSES HERE
+# Use Arduino Serial Monitor (e.g., "robot/registry/246F28A1B2C3")
+ROBOT_MAPPING = {
+    1: "REPLACE_WITH_MAC_ADDRESS_FOR_ROBOT_1",  # e.g., "A1B2C3D4E5F6"
+    2: "REPLACE_WITH_MAC_ADDRESS_FOR_ROBOT_2",
+    3: "REPLACE_WITH_MAC_ADDRESS_FOR_ROBOT_3",
+    4: "REPLACE_WITH_MAC_ADDRESS_FOR_ROBOT_4"
+}
+
+# ==========================================
+
+_client_instance = None
+_printed_messages = set()
+
+def print_once(key, msg):
+    if key not in _printed_messages:
+        print(msg)
+        _printed_messages.add(key)
+
+class MQTTGameClient:
+    def __init__(self, broker_ip, port):
+        self.broker_ip = broker_ip
+        self.port = port
+        self.client = mqtt.Client(client_id="Sim_Controller", protocol=mqtt.MQTTv311)
+        self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
+        self.connected = False
         self.running = False
-        self.is_connected = False
-        self.command_queue = asyncio.Queue(maxsize=100)
-        print(f"WS_CLIENT_INIT: Instance created for {self.uri}. Running: {self.running}, Connected: {self.is_connected}")
 
-    async def _connect_and_send_loop(self):
-        print("WS_CLIENT_THREAD: _connect_and_send_loop started.")
-        while self.running:
-            connection = None
-            self.is_connected = False
+    def on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.connected = True
+            print(f"MQTT_CLIENT: Connected to Broker {self.broker_ip}")
+        else:
+            print(f"MQTT_CLIENT: Connection failed with code {rc}")
 
-            try:
-                print(f"WS_CLIENT_THREAD: Attempting to connect to {self.uri}...")
-                connection = await asyncio.wait_for(websockets.connect(self.uri), timeout=5.0)
-                print(f"WS_CLIENT_THREAD: Successfully connected to WebSocket: {self.uri}")
-                self.is_connected = True
-
-                while self.running and self.is_connected:
-                    try:
-                        command_payload = await asyncio.wait_for(self.command_queue.get(), timeout=0.1)
-                        if command_payload is None:
-                            print("WS_CLIENT_THREAD: Got None shutdown signal from queue.")
-                            self.is_connected = False
-                            if not self.running:
-                                self.command_queue.task_done()
-                                print("WS_CLIENT_THREAD: Shutdown signal processed, exiting inner send loop.")
-                                return
-                            else:
-                                print("WS_CLIENT_THREAD: Got None from queue but still running? Breaking inner loop.")
-                                self.command_queue.task_done()
-                                break
-                        if command_payload:
-                            await connection.send(json.dumps(command_payload))
-                            self.command_queue.task_done()
-                    except asyncio.TimeoutError:
-                        continue
-                    except websockets.exceptions.ConnectionClosedOK:
-                        print("WS_CLIENT_THREAD: WebSocket connection closed normally (OK).")
-                        self.is_connected = False; break
-                    except websockets.exceptions.ConnectionClosedError as e:
-                        print(f"WS_CLIENT_THREAD: WebSocket connection closed with error: {e}.")
-                        self.is_connected = False; break
-                    except Exception as e_inner:
-                        print(f"WS_CLIENT_THREAD: Error in WebSocket send_loop (inner): {e_inner}")
-
-                        await asyncio.sleep(0.1)
-                if not self.running: print("WS_CLIENT_THREAD: self.running is False, breaking outer connection loop."); break
-            except asyncio.TimeoutError: print(f"WS_CLIENT_THREAD: WebSocket connection to {self.uri} timed out. Will retry.")
-            except (websockets.exceptions.InvalidURI, websockets.exceptions.InvalidHandshake, ConnectionRefusedError, OSError) as e_conn_protocol:
-                print(f"WS_CLIENT_THREAD: WebSocket connection/protocol error (outer): {e_conn_protocol}. Will retry.")
-            except Exception as e_outer:
-                print(f"WS_CLIENT_THREAD: Unexpected WebSocket error in _connect_and_send_loop (outer): {e_outer}"); traceback.print_exc() 
-            finally:
-
-                self.is_connected = False
-                if connection:
-                    try:
-
-                        await connection.close()
-                    except Exception: pass 
-                connection = None
-            if not self.running: print("WS_CLIENT_THREAD: self.running is False after outer 'finally', exiting _connect_and_send_loop."); break
-            if self.running:
-
-                try:
-                    for _ in range(50):
-                        if not self.running: break
-                        await asyncio.sleep(0.1)
-                except asyncio.CancelledError: print("WS_CLIENT_THREAD: Sleep interrupted for shutdown."); break
-        print("WS_CLIENT_THREAD: _connect_and_send_loop finished."); self.is_connected = False
-
-    def _run_event_loop(self):
-        print("WS_CLIENT: _run_event_loop creating new event loop.")
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-
-        print(f"WS_CLIENT: Event loop created. self.running is {self.running}. Starting _connect_and_send_loop.")
-        try:
-            self.loop.run_until_complete(self._connect_and_send_loop())
-        except Exception as e: print(f"WS_CLIENT: Error running WebSocket event loop: {e}"); traceback.print_exc()
-        finally:
-            print("WS_CLIENT: _run_event_loop 'finally'. Cleaning queue...")
-            while not self.command_queue.empty():
-                try: self.command_queue.get_nowait(); self.command_queue.task_done()
-                except: break 
-            if self.loop and self.loop.is_running():
-                print("WS_CLIENT: Stopping asyncio event loop from _run_event_loop finally...")
-                self.loop.call_soon_threadsafe(self.loop.stop)
-            if self.loop and not self.loop.is_closed():
-                print("WS_CLIENT: Closing asyncio event loop...")
-
-                all_tasks = asyncio.all_tasks(loop=self.loop)
-                if all_tasks:
-                    self.loop.run_until_complete(asyncio.gather(*all_tasks, return_exceptions=True))
-                self.loop.close()
-                print("WS_CLIENT: Asyncio event loop closed.")
-            else: print("WS_CLIENT: Asyncio event loop None, not running, or already closed in _run_event_loop finally.")
-            print("WS_CLIENT: WebSocket event loop fully stopped from _run_event_loop.")
-        self.running = False; self.is_connected = False
+    def on_disconnect(self, client, userdata, rc):
+        self.connected = False
+        print("MQTT_CLIENT: Disconnected from Broker")
 
     def start(self):
-        if self.thread and self.thread.is_alive():
-            print("WS_CLIENT: Client thread already alive and running.")
-            if not self.running: 
-                self.running = True 
-                print("WS_CLIENT: (Thread was alive but running flag was false, reset to True)")
-            return
-
-        print("WS_CLIENT: Starting new client thread...")
-        self.running = True 
-        self.is_connected = False 
-        self.thread = threading.Thread(target=self._run_event_loop, daemon=True)
-        self.thread.start()
-        print("WS_CLIENT: Client thread started.")
+        if self.running: return
+        print(f"MQTT_CLIENT: Connecting to {self.broker_ip}:{self.port}...")
+        try:
+            self.client.connect(self.broker_ip, self.port, 60)
+            self.client.loop_start()
+            self.running = True
+        except Exception as e:
+            print(f"MQTT_CLIENT: Failed to start: {e}")
 
     def stop(self):
-        print("WS_CLIENT: Attempting to stop client...")
-        if not self.running and not (self.thread and self.thread.is_alive()):
-            print("WS_CLIENT: Client already stopped or not started effectively.")
-            return
-
-        self.running = False 
-        self.is_connected = False
-
-        if self.loop and self.loop.is_running(): 
-            print("WS_CLIENT: Queuing shutdown signal (None) to command_queue...")
-            future = asyncio.run_coroutine_threadsafe(self.command_queue.put(None), self.loop)
-            try: future.result(timeout=1.0); print("WS_CLIENT: Shutdown signal queued successfully.")
-            except TimeoutError: print("WS_CLIENT: Timeout putting shutdown signal on queue.")
-            except Exception as e: print(f"WS_CLIENT: Exception putting shutdown signal: {e}")
-        else: print("WS_CLIENT: Event loop not available/running for queuing shutdown signal.")
-
-        if self.thread and self.thread.is_alive():
-            print(f"WS_CLIENT: Joining client thread (timeout 7s)...")
-            self.thread.join(timeout=7.0)
-            if self.thread.is_alive(): print("WS_CLIENT: Warning: Client thread did not stop gracefully.")
-            else: print("WS_CLIENT: Client thread joined.")
-        else: print("WS_CLIENT: Client thread was not alive to join.")
-
-        self.loop = None
-        print("WS_CLIENT: Client stop process complete.")
+        if not self.running: return
+        print("MQTT_CLIENT: Stopping...")
+        self.client.loop_stop()
+        self.client.disconnect()
+        self.running = False
+        self.connected = False
 
     def check_if_actively_connected(self):
-        return self.running and self.is_connected
+        return self.running and self.connected
 
     def send_joystick_command(self, userid: int, x: float, y: float):
+        """
+        Sends the {x, y} payload to the specific robot's control topic.
+        """
         if not self.check_if_actively_connected():
-
             return
-        payload = {"type": "joystick", "userid": userid, "joystick": {'x': round(x,2), 'y': round(y,2)}}
-        try: self.command_queue.put_nowait(payload)
-        except queue.Full: 
-             print_once_ws("ws_q_full", "WS_CLIENT (send_cmd): Command queue full. Cmd dropped.")
-        except Exception as e: print_once_ws(f"ws_q_put_err_{e}", f"WS_CLIENT (send_cmd): Error on queue put: {e}")
 
-WS_CLIENT_URI = "ws://89.117.63.5:8000/ws/mobilecontrol"
-_ws_game_client_instance = None 
+        if userid not in ROBOT_MAPPING:
+            print_once(f"missing_mac_{userid}", f"MQTT_CLIENT: No MAC address mapped for Robot ID {userid}!")
+            return
+
+        mac_address = ROBOT_MAPPING[userid]
+        topic = f"robot/control/{mac_address}"
+        
+        payload = json.dumps({
+            "x": round(x, 2),
+            "y": round(y, 2)
+        })
+
+        try:
+            self.client.publish(topic, payload, qos=0)
+            # print(f"Sent to {topic}: {payload}") # Uncomment for verbose debugging
+        except Exception as e:
+            print(f"MQTT_CLIENT: Error publishing: {e}")
 
 def init_global_ws_client():
-    global _ws_game_client_instance
-    if _ws_game_client_instance is None or not _ws_game_client_instance.running:
-        if _ws_game_client_instance and not _ws_game_client_instance.running:
-            print("WS_CLIENT_GLOBAL: Previous client instance was stopped. Ensuring full cleanup before re-initializing.")
-            _ws_game_client_instance.stop() 
-            _ws_game_client_instance = None
-        print(f"WS_CLIENT_GLOBAL: Initializing WebSocket client for URI: {WS_CLIENT_URI}")
-        _ws_game_client_instance = WebSocketGameClient(WS_CLIENT_URI)
-        _ws_game_client_instance.start()
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = MQTTGameClient(MQTT_BROKER_IP, MQTT_PORT)
+        _client_instance.start()
     else:
-        print("WS_CLIENT_GLOBAL: WebSocket client already initialized and appears to be running.")
+        print("MQTT_CLIENT: Already initialized.")
 
-def get_global_ws_client(): 
-    global _ws_game_client_instance
-    return _ws_game_client_instance
+def get_global_ws_client():
+    global _client_instance
+    return _client_instance
 
 def shutdown_global_ws_client():
-    global _ws_game_client_instance
-    if _ws_game_client_instance:
-        print("WS_CLIENT_GLOBAL: Shutting down WebSocket client...")
-        _ws_game_client_instance.stop()
-        _ws_game_client_instance = None
-        print("WS_CLIENT_GLOBAL: Global WebSocket client instance shut down and cleared.")
-    else:
-        print("WS_CLIENT_GLOBAL: No active WebSocket client to shut down.")
+    global _client_instance
+    if _client_instance:
+        _client_instance.stop()
+        _client_instance = None
 
-if __name__ == '__main__': 
-    print("Starting WebSocket client test (ws_client.py)...")
+if __name__ == '__main__':
+    print("Testing MQTT Client...")
     init_global_ws_client()
-    client = get_global_ws_client()
-
-    start_time = time.time(); connection_wait_time = 7
-    print(f"Waiting up to {connection_wait_time}s for initial connection attempt...")
-    while time.time() - start_time < connection_wait_time:
-        if client and client.check_if_actively_connected(): print("TEST: Client connected!"); break
-        time.sleep(0.5)
+    time.sleep(1)
+    
+    cl = get_global_ws_client()
+    if cl.check_if_actively_connected():
+        print("Connected! Sending test command to Robot 1...")
+        # Simulates "Forward"
+        cl.send_joystick_command(1, 0.0, 1.0) 
+        time.sleep(1)
+        cl.send_joystick_command(1, 0.0, 0.0)
     else:
-        if client: print(f"TEST: Client did not connect. Status: running={client.running}, connected={client.is_connected}")
-        else: print(f"TEST: Client is None after {connection_wait_time}s.")
-
-    if client and client.check_if_actively_connected():
-        print("TEST: Sending test joystick command..."); client.send_joystick_command(userid=1, x=0.51, y=-0.26)
-        time.sleep(2); print("TEST: Sending another test command..."); client.send_joystick_command(userid=1, x=0.1, y=0.1)
-        time.sleep(2)
-    else: print("TEST: WebSocket client not actively connected, test command not sent.")
-    print("TEST: Shutting down WebSocket client..."); shutdown_global_ws_client()
-    print("TEST: Test finished (ws_client.py).")
+        print("Failed to connect.")
+    
+    shutdown_global_ws_client()
