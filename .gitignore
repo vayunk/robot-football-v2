@@ -1,2 +1,4 @@
 simulation/__pycache__/
 simulation/main_sim_log.txt
+simulation/camera_calibration_data/
+simulation/perspective_transform_matrices.npz
