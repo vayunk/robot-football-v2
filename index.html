@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Controller</title>
+
+<script src="https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt-min.js"></script>
+
+<style>
+  body {
+    margin: 0;
+    background: #111;
+    color: white;
+    font-family: Arial;
+    touch-action: none;
+  }
+
+  #botSelectScreen {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    gap: 20px;
+  }
+
+  .botBtn {
+    padding: 20px;
+    background: #222;
+    border: 2px solid #00bcd4;
+    color: white;
+    font-size: 24px;
+    border-radius: 12px;
+    width: 260px;
+    text-align: center;
+  }
+
+  #controllerUI {
+    display: none;
+    justify-content: space-between;
+    height: 100vh;
+    position: relative;
+  }
+
+  #exitBtn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    font-size: 18px;
+    background: red;
+    color: white;
+    border-radius: 10px;
+  }
+
+  .joystick {
+    width: 300px;
+    height: 300px;
+    background: #222;
+    border-radius: 50%;
+    position: relative;
+    margin: auto;
+  }
+
+  .stick {
+    width: 100px;
+    height: 100px;
+    background: #00bcd4;
+    border-radius: 50%;
+    position: absolute;
+    left: 100px;
+    top: 100px;
+  }
+</style>
+</head>
+
+<body>
+
+<!-- BOT SELECTION -->
+<div id="botSelectScreen">
+    <h1>Select Your Robot</h1>
+    <div class="botBtn" onclick="selectBot(1)">🤖 Bot 1</div>
+    <div class="botBtn" onclick="selectBot(2)">🤖 Bot 2</div>
+</div>
+
+<!-- CONTROLLER UI -->
+<div id="controllerUI">
+    <button id="exitBtn" onclick="resetApp()">Exit</button>
+    <div id="joyLeft" class="joystick"><div class="stick"></div></div>
+    <div id="joyRight" class="joystick"><div class="stick"></div></div>
+</div>
+
+<script>
+////////////////////////////////////////////////////////////
+// GLOBAL STATE
+////////////////////////////////////////////////////////////
+let currentTopic = "";
+let mqttReady = false;
+let move = { x: 0, y: 0 };
+let turn = 0;
+let lastSent = { x: null, y: null };
+let lastSendTime = 0;
+
+////////////////////////////////////////////////////////////
+// BOT SELECTOR
+////////////////////////////////////////////////////////////
+function selectBot(bot) {
+    currentTopic = (bot === 1)
+        ? "robot/control/841FE817F69C"
+        : "robot/control/841FE81AB250";
+
+    document.getElementById("botSelectScreen").style.display = "none";
+    document.getElementById("controllerUI").style.display = "flex";
+
+    setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+}
+
+function resetApp() {
+    currentTopic = "";
+    document.getElementById("controllerUI").style.display = "none";
+    document.getElementById("botSelectScreen").style.display = "flex";
+}
+
+////////////////////////////////////////////////////////////
+// MQTT SETUP
+////////////////////////////////////////////////////////////
+const client = new Paho.Client(
+    "dokploy.srv2.kclelectronics.co.uk",
+    9001,
+    "/mqtt",
+    "client_" + Math.random().toString(16).slice(2)
+);
+
+client.connect({
+    useSSL: false,
+    onSuccess: () => { console.log("MQTT connected!"); mqttReady = true; },
+    onFailure: e => console.log("MQTT failed:", e)
+});
+
+function publishXY(x, y) {
+    if (!mqttReady || !currentTopic) return;
+
+    const msg = new Paho.Message(JSON.stringify({ x, y }));
+    msg.destinationName = currentTopic;
+    client.send(msg);
+}
+
+////////////////////////////////////////////////////////////
+// JOYSTICK (WORKING VERSION)
+////////////////////////////////////////////////////////////
+function setupJoystick(id, callback) {
+    const joy = document.getElementById(id);
+    const stick = joy.querySelector(".stick");
+
+    let active = false;
+    let rect, centerX, centerY, radius;
+
+    function recalc() {
+        rect = joy.getBoundingClientRect();
+        centerX = rect.left + rect.width / 2;
+        centerY = rect.top + rect.height / 2;
+        radius = rect.width / 2;
+    }
+
+    setTimeout(recalc, 50);
+    window.addEventListener("resize", recalc);
+
+    function update(clientX, clientY) {
+        if (!radius) return;
+
+        let dx = clientX - centerX;
+        let dy = clientY - centerY;
+
+        const dist = Math.hypot(dx, dy);
+        if (dist > radius) {
+            dx = (dx / dist) * radius;
+            dy = (dy / dist) * radius;
+        }
+
+        stick.style.left = (dx + radius - 50) + "px";
+        stick.style.top = (dy + radius - 50) + "px";
+
+        callback(
+            Number((dx / radius).toFixed(2)),
+            Number((-dy / radius).toFixed(2))
+        );
+    }
+
+    function end() {
+        active = false;
+        stick.style.left = "100px";
+        stick.style.top = "100px";
+        
+        // STOP COMMAND BURST (for reliability)
+        for (let i = 0; i < 3; i++) {
+            publishXY(0, 0);
+        }
+
+        callback(0, 0);
+    }
+
+    // MOUSE
+    joy.addEventListener("mousedown", e => { active = true; update(e.clientX, e.clientY); });
+    window.addEventListener("mousemove", e => { if (active) update(e.clientX, e.clientY); });
+    window.addEventListener("mouseup", end);
+
+    // TOUCH
+    joy.addEventListener("touchstart", e => { active = true; update(e.touches[0].clientX, e.touches[0].clientY); });
+    joy.addEventListener("touchmove", e => { if (active) update(e.touches[0].clientX, e.touches[0].clientY); });
+    joy.addEventListener("touchend", end);
+}
+
+setupJoystick("joyLeft", (x, y) => { move.x = x; move.y = y; });
+setupJoystick("joyRight", (x, y) => {
+    turn = (x > 0.6) ? 1 : (x < -0.6) ? -1 : 0;
+});
+
+////////////////////////////////////////////////////////////
+// MAIN LOOP — THROTTLED + CHANGE DETECTION
+////////////////////////////////////////////////////////////
+const SEND_INTERVAL = 35; // ~30 fps, responsive but not spammy
+
+setInterval(() => {
+    if (!mqttReady || !currentTopic) return;
+
+    let x = move.x;
+    let y = move.y;
+
+    if (turn === 1) { x = 99; y = 99; }
+    else if (turn === -1) { x = -99; y = -99; }
+
+    const now = performance.now();
+
+    // Only send if:
+    // 1. values changed
+    // 2. enough time passed
+    if (
+        (x !== lastSent.x || y !== lastSent.y) &&
+        (now - lastSendTime > SEND_INTERVAL)
+    ) {
+        publishXY(x, y);
+        lastSent = { x, y };
+        lastSendTime = now;
+    }
+
+}, 10);  // super fast internal tick, but throttled sending
+</script>
+
+
+</body>
+</html>
