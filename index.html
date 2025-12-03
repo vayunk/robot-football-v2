@@ -132,7 +132,7 @@ const client = new Paho.Client(
 );
 
 client.connect({
-    useSSL: true,
+    useSSL: false,
     onSuccess: () => { console.log("MQTT connected!"); mqttReady = true; },
     onFailure: e => console.log("MQTT failed:", e)
 });
